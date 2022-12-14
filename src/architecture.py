@@ -98,13 +98,13 @@ class SdUnet(tf.keras.models.Model):
         self.dense_aspp_block = DenseAsppBlock(256)
         # Decoder
         self.first_up_conv_block = UpConvBlock(256)
-        self.first_decode_sa_block = UpConvBlock(256)
+        self.first_decode_sa_block = SaBlock(256)
         self.second_up_conv_block = UpConvBlock(128)
-        self.second_decode_sa_block = UpConvBlock(128)
+        self.second_decode_sa_block = SaBlock(128)
         self.third_up_conv_block = UpConvBlock(64)
-        self.third_decode_sa_block = UpConvBlock(64)
+        self.third_decode_sa_block = SaBlock(64)
         self.fourth_up_conv_block = UpConvBlock(32)
-        self.fourth_decode_sa_block = UpConvBlock(32)
+        self.fourth_decode_sa_block = SaBlock(32)
     
     def call(self, input):
         x = self.input(input)
