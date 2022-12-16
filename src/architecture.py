@@ -9,8 +9,8 @@ class ConvBlock(tf.keras.layers.Layer):
                                            dilation_rate=dilation_rate)
         self.group_norm = tfa.layers.GroupNormalization(groups=32)
 
-    def call(self, input):
-        x = self.conv(input)
+    def call(self, inputs):
+        x = self.conv(inputs)
         x = self.group_norm(x)
         out = tf.nn.leaky_relu(x)
         return out
@@ -23,11 +23,12 @@ class SaBlock(tf.keras.layers.Layer):
         self.first_y_conv_block = ConvBlock(filters)
         self.second_y_conv_block = ConvBlock(filters)
         self.up_sampling = tf.keras.layers.UpSampling2D()
+        self.avgpool = tf.keras.layers.AveragePooling2D()
 
-    def call(self, input):
-        x = self.first_x_conv_block(input)
+    def call(self, inputs):
+        x = self.first_x_conv_block(inputs)
         x = self.second_x_conv_block(x)
-        y = tf.nn.avg_pool2d(input)
+        y = self.avgpool(inputs)
         y = self.first_y_conv_block(y)
         y = self.second_y_conv_block(y)
         y = self.up_sampling(y)
@@ -39,10 +40,12 @@ class DownConvBlock(tf.keras.layers.Layer):
     def __init__(self, filters):
         super(DownConvBlock, self).__init__()
         self.conv_block = ConvBlock(filters, kernel_size=1)
-    
-    def call(self, input):
-        x = tf.nn.max_pool2d(input)
-        y = tf.nn.avg_pool2d(input)
+        self.maxpool = tf.keras.layers.MaxPool2D()
+        self.avgpool = tf.keras.layers.AveragePooling2D()
+
+    def call(self, inputs):
+        x = self.maxpool(inputs)
+        y = self.avgpool(inputs)
         z = tf.concat([x, y], axis=-1)
         out = self.conv_block(z)
         return out
@@ -53,8 +56,8 @@ class UpConvBlock(tf.keras.layers.Layer):
         self.up_sampling = tf.keras.layers.UpSampling2D(interpolation='bilinear')
         self.conv_block = ConvBlock(filters, kernel_size=1)
     
-    def call(self, input):
-        x = self.up_sampling(input)
+    def call(self, inputs):
+        x = self.up_sampling(inputs)
         out = self.conv_block(x)
         return out    
 
@@ -66,24 +69,31 @@ class DenseAsppBlock(tf.keras.layers.Layer):
         self.fourth_branch_conv_block = ConvBlock(filters, dilation_rate=6)
         self.fifth_branch_conv_block = ConvBlock(filters, kernel_size=1)
         self.last_branch_conv_block = ConvBlock(filters, kernel_size=1)
-    
-    def call(self, input):
-        dims = input.shape
-        fifth_branch = self.fourth_conv_block(input)
-        fourth_branch = self.fourth_branch_conv_block(input)
-        third_branch_concat = tf.concat([input, fourth_branch], axis=-1)
+        self.avgpool = tf.keras.layers.AveragePooling2D()
+        self.upsample = tf.keras.layers.UpSampling2D(interpolation="bilinear")
+        self.first_branch_conv_block = ConvBlock(filters, kernel_size=1)
+
+    def call(self, inputs):
+        dims = inputs.shape
+        fifth_branch = self.fifth_branch_conv_block(inputs)
+        fourth_branch = self.fourth_branch_conv_block(inputs)
+        third_branch_concat = tf.concat([inputs, fourth_branch], axis=-1)
         third_branch = self.third_branch_conv_block(third_branch_concat)
-        second_branch_first_concat = tf.concat([input, third_branch_concat], axis=-1)
+        second_branch_first_concat = tf.concat([inputs, third_branch_concat], axis=-1)
         second_branch_second_concat = tf.concat([third_branch, second_branch_first_concat], axis=-1)
         second_branch = self.second_branch_conv_block(second_branch_second_concat)
-        first_branch = tf.nn.avg_pool2d(input=input, ksize=(dims[-3, dims[-2]]))
+        first_branch = self.avgpool(inputs)
+        first_branch = self.first_branch_conv_block(first_branch)
+        first_branch = self.upsample(first_branch)
 
-        out = tf.concat([first_branch, second_branch, third_branch, fourth_branch, fifth_branch], axis=-1)
+        concat = tf.concat([first_branch, second_branch, third_branch, fourth_branch, fifth_branch], axis=-1)
+        out = self.last_branch_conv_block(concat)
         return out
         
 class SdUnet(tf.keras.models.Model):
-    def __init__(self, input_shape):
-        self.input = tf.keras.layers.Input(input_shape)
+    def __init__(self, num_classes):
+        super(SdUnet, self).__init__()
+        # self.inputs = tf.keras.layers.Input()
         # Encoder
         self.first_encode_sa_block = SaBlock(32)
         self.first_down_conv_block = DownConvBlock(32)
@@ -105,11 +115,18 @@ class SdUnet(tf.keras.models.Model):
         self.third_decode_sa_block = SaBlock(64)
         self.fourth_up_conv_block = UpConvBlock(32)
         self.fourth_decode_sa_block = SaBlock(32)
-    
-    def call(self, input):
-        x = self.input(input)
+        if num_classes == 2:
+            n = 1
+            activation = "sigmoid"
+        else:
+            n = num_classes
+            activation = "softmax"
+        self.out_conv = tf.keras.layers.Conv2D(filters=n, kernel_size=3, padding="same", activation=activation)
+
+    def call(self, inputs):
+        # x = self.inputs(inputs)
         # Encoder
-        first_sa = self.first_encode_sa_block(x)
+        first_sa = self.first_encode_sa_block(inputs)
         x = self.first_down_conv_block(first_sa)
         second_sa = self.second_encode_sa_block(x)
         x = self.second_down_conv_block(second_sa)
@@ -122,15 +139,16 @@ class SdUnet(tf.keras.models.Model):
         x = self.dense_aspp_block(fifth_sa)
         # Decoder
         first_up = self.first_up_conv_block(x)
-        x_concat = tf.concat([fourth_sa, first_up])
+        x_concat = tf.concat([fourth_sa, first_up], axis=-1)
         x = self.first_decode_sa_block(x_concat)
         second_up = self.second_up_conv_block(x)
-        x_concat = tf.concat([third_sa, second_up])
+        x_concat = tf.concat([third_sa, second_up], axis=-1)
         x = self.second_decode_sa_block(x_concat)
         third_up = self.third_up_conv_block(x)
-        x_concat = tf.concat([second_sa, third_up])
+        x_concat = tf.concat([second_sa, third_up], axis=-1)
         x = self.third_decode_sa_block(x_concat)
         fourth_up = self.fourth_up_conv_block(x)
-        x_concat = tf.concat([first_sa, fourth_up])
-        out = self.fourth_decode_sa_block(x_concat)
+        x_concat = tf.concat([first_sa, fourth_up], axis=-1)
+        x = self.fourth_decode_sa_block(x_concat)
+        out = self.out_conv(x)
         return out
